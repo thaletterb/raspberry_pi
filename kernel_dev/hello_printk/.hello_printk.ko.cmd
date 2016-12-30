@@ -1,0 +1,1 @@
+cmd_/home/pi/scratch/kernel_dev/hello_printk/hello_printk.ko := ld -EL -r  -T ./scripts/module-common.lds --build-id  -o /home/pi/scratch/kernel_dev/hello_printk/hello_printk.ko /home/pi/scratch/kernel_dev/hello_printk/hello_printk.o /home/pi/scratch/kernel_dev/hello_printk/hello_printk.mod.o
