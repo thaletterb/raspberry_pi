@@ -18,3 +18,6 @@ PWD   := $(shell pwd)
 # source and compile only the modules in the PWD (local) directory.
 default:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
+
+clean:
+	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean

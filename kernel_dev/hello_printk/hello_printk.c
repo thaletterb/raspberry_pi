@@ -11,7 +11,11 @@
  * of the module_init() macro.
  */
 #include <linux/init.h>
+#include <linux/kernel.h>	// Needed for KERN_INFO
 #include <linux/module.h>
+
+static int hello_data __initdata = 3;	// __initdata is similar to __init macro, but for vars instead of funcs
+										// __init causes the init function to be discared and its mem freed once the init function finished for built in drivers 
 
 /*
  * This is the init function, which is run when the module is first
@@ -22,7 +26,7 @@
 static int __init
 hello_init(void)
 {
-	printk("Hello, world!\n");
+	printk(KERN_INFO "Hello, world! %d\n", hello_data);
 	return 0;
 }
 
