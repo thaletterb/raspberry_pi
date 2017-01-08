@@ -23,10 +23,14 @@ MODULE_VERSION("0.1");
 
 typedef struct sensor_data_t
 {
+	uint8_t gain;
+	uint8_t integration_time;
 	struct input_dev *device;
 }sensor_data_t;
 
 sensor_data_t *sensor_data;
+
+#define TO_TSL(x)	(tsl2561_t*) x
 
 /*
 *	I2C Setup
@@ -116,6 +120,7 @@ void tsl2561_disable_autogain(void *_tsl);
 uint8_t tsl2561_write_byte_data(void *_tsl, uint8_t reg, uint8_t value);
 uint16_t tsl2561_write_word_data(void *_tsl, uint8_t reg, uint8_t value);
 int16_t tsl2561_read_word_data(void *_tsl, uint8_t cmd);
+unsigned long tsl2561_compute_lux(void *_tsl, int visible, int channel1);
 
 
 // writes a byte on the i2c bus
@@ -158,6 +163,24 @@ int16_t tsl2561_read_word_data(void *_tsl, uint8_t reg)
 	return data;
 }
 
+// sets the time integration and gain value 
+void tsl2561_set_timing(void *_tsl, int integration_time, int gain)
+{
+	// tsl2561_t *tsl = TO_TSL(_tsl);
+
+	// update values
+	 sensor_data->integration_time = integration_time;
+	 sensor_data->gain = gain;
+
+	tsl2561_write_byte_data(i2c_client, TSL2561_CMD_BIT | TSL2561_REG_TIMING, integration_time | gain);
+}
+
+// sets the gain value
+void tsl2561_set_gain(void *_tsl, int gain)
+{
+	// tsl2561_t *tsl = TO_TSL(_tsl);
+	tsl2561_set_timing(i2c_client, sensor_data->integration_time, gain);
+}
 // enables TSL2561 sensor
 int tsl2561_enable(void)
 {
