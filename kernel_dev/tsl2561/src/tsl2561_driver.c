@@ -266,6 +266,7 @@ int __init tsl2561_init(void)
 	// value = i2c_smbus_read_byte(i2c_client)
 	// printk(KERN_INFO "Flush value: %d\n", value);
 	tsl2561_enable();
+	tsl2561_set_timing((void*)sensor_data, sensor_data->integration_time, sensor_data->gain);
 finish:
 	return result;
 }
