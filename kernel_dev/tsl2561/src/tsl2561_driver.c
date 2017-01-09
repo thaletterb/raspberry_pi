@@ -28,6 +28,7 @@ typedef struct sensor_data_t
 	uint8_t gain;
 	uint8_t integration_time;
 	bool autogain;
+	uint8_t type;
 	struct input_dev *device;
 }sensor_data_t;
 
@@ -71,7 +72,9 @@ static struct i2c_board_info __initdata board_info[] = {
 
 static void i2c_work_handler(struct work_struct* work)
 {
+	long lux = tsl2561_lux((void*)sensor_data);
 	printk(KERN_INFO "Doing Work\n");
+	printk(KERN_INFO "%lu\n", lux);
 }
 
 DECLARE_WORK(i2c_work, i2c_work_handler);
@@ -131,6 +134,74 @@ static void i2c_timer_callback(unsigned long data)
 #define TSL2561_CLIPPING_101MS 37000
 #define TSL2561_CLIPPING_402MS 65000
 
+/*
+ * Constats for simplified lux calculation
+ * according TAOS Inc.
+ */
+#define LUX_SCALE 14
+#define RATIO_SCALE 9
+
+#define CH_SCALE 10
+#define CH_SCALE_TINT0 0x7517
+#define CH_SCALE_TINT1 0x0FE7
+
+/* 
+ * T, FN, and CL Package coefficients
+ */
+#define TSL2561_K1T 0x0040
+#define TSL2561_B1T 0x01F2
+#define TSL2561_M1T 0x01BE
+#define TSL2561_K2T 0x0080
+#define TSL2561_B2T 0x0214
+#define TSL2561_M2T 0x02D1
+#define TSL2561_K3T 0x00C0
+#define TSL2561_B3T 0x023F
+#define TSL2561_M3T 0x037B
+#define TSL2561_K4T 0x0100
+#define TSL2561_B4T 0x0270
+#define TSL2561_M4T 0x03FE
+#define TSL2561_K5T 0x0138
+#define TSL2561_B5T 0x016F
+#define TSL2561_M5T 0x01fC
+#define TSL2561_K6T 0x019A
+#define TSL2561_B6T 0x00D2
+#define TSL2561_M6T 0x00FB
+#define TSL2561_K7T 0x029A
+#define TSL2561_B7T 0x0018
+#define TSL2561_M7T 0x0012
+#define TSL2561_K8T 0x029A
+#define TSL2561_B8T 0x0000
+#define TSL2561_M8T 0x0000
+
+
+
+/* 
+ * CS package coefficients
+ */
+#define TSL2561_K1C 0x0043
+#define TSL2561_B1C 0x0204
+#define TSL2561_M1C 0x01AD
+#define TSL2561_K2C 0x0085
+#define TSL2561_B2C 0x0228
+#define TSL2561_M2C 0x02C1
+#define TSL2561_K3C 0x00C8
+#define TSL2561_B3C 0x0253
+#define TSL2561_M3C 0x0363
+#define TSL2561_K4C 0x010A
+#define TSL2561_B4C 0x0282
+#define TSL2561_M4C 0x03DF
+#define TSL2561_K5C 0x014D
+#define TSL2561_B5C 0x0177
+#define TSL2561_M5C 0x01DD
+#define TSL2561_K6C 0x019A
+#define TSL2561_B6C 0x0101
+#define TSL2561_M6C 0x0127
+#define TSL2561_K7C 0x029A
+#define TSL2561_B7C 0x0037
+#define TSL2561_M7C 0x002B
+#define TSL2561_K8C 0x029A
+#define TSL2561_B8C 0x0000
+#define TSL2561_M8C 0x0000
 
 /*
 *	 Helper functions
@@ -258,16 +329,16 @@ void tsl2561_read(void *_tsl, int *broadband, int *ir)
 	switch(sensor_data->integration_time)
 	{
 		case TSL2561_INTEGRATION_TIME_402MS:
-			msleep(402);
+			msleep_interruptible(402);
 			break;
 		case TSL2561_INTEGRATION_TIME_101MS:
-			msleep(102);
+			msleep_interruptible(102);
 			break;
 		case TSL2561_INTEGRATION_TIME_13MS:
-			msleep(14);
+			msleep_interruptible(14);
 			break;
 		default:
-			msleep(402);
+			msleep_interruptible(402);
 			break;
 	}
 
@@ -304,6 +375,7 @@ long tsl2561_lux(void *_tsl)
 
 	if((visible > threshold) || (channel1 > threshold))
 	{
+		printk("Here\n");
 		return 0;
 	}
 
@@ -365,6 +437,106 @@ void tsl2561_luminosity(void *_tsl, int *channel0, int *channel1)
 	}
 	
 }
+
+// helper function for computing lux values
+unsigned long tsl2561_compute_lux(void *_tsl, int ch0, int ch1)
+{
+	//tsl2561_t *tsl = TO_TSL(_tsl);
+	unsigned long ch_scale, channel0, channel1;
+
+	unsigned long tmp;
+	unsigned long lux;
+	unsigned long ratio = 0, ratio1 = 0;
+	int b, m;
+
+	// first scale the channel values depending on gain and integration time
+	switch(sensor_data->integration_time)
+	{
+		case TSL2561_INTEGRATION_TIME_13MS:
+			ch_scale = CH_SCALE_TINT0;
+			break;
+		case TSL2561_INTEGRATION_TIME_101MS:
+			ch_scale = CH_SCALE_TINT1;
+			break;
+		default:
+			ch_scale = (1 << CH_SCALE);
+			break;
+	}
+
+	// scale if gain is not 16x
+	if(!sensor_data->gain)
+	{	
+		ch_scale = (ch_scale << 4);	// scale 1x to 16x
+	}
+
+	//scale the channel values
+
+	channel0 = (ch0 * ch_scale) >> CH_SCALE;
+	channel1 = (ch1 * ch_scale) >> CH_SCALE;
+
+	
+	// find the ratio of the channel values and protect against div by 0
+	if(channel0 != 0)
+		ratio1 = (channel1 << (RATIO_SCALE+1)) / channel1;
+
+	// round the ratio value
+	ratio = (ratio1 + 1) >> 1;
+
+
+	switch(sensor_data->type)
+	{
+		case 1:
+			if((ratio >= 0) && (ratio <= TSL2561_K1C)){ 
+				b = TSL2561_B1C; m = TSL2561_M1C; 
+			} else if(ratio <= TSL2561_K2C) {
+				b = TSL2561_B2C; m = TSL2561_M2C;
+			} else if(ratio <= TSL2561_K3C) {
+				b = TSL2561_B3C; m = TSL2561_M3C;
+			} else if(ratio <= TSL2561_K4C) {
+				b = TSL2561_B4C; m = TSL2561_M4C;
+			} else if (ratio <= TSL2561_K5T) {
+				b = TSL2561_B5C; m = TSL2561_M5C;
+			} else if(ratio <= TSL2561_K6T) {
+				b = TSL2561_B6C; m = TSL2561_M6C;
+			} else if(ratio <= TSL2561_K7T) {
+				b = TSL2561_B7C; m = TSL2561_M7C;
+			} else if(ratio > TSL2561_K8C) {
+				b = TSL2561_B8C; m = TSL2561_M8C;
+			}
+			break;
+		case 0:
+		default:
+			if((ratio >= 0) && (ratio <= TSL2561_K1T)){ 
+				b = TSL2561_B1T; m = TSL2561_M1T;
+			} else if(ratio <= TSL2561_K2T) {
+				b = TSL2561_B2T; m = TSL2561_M2T;
+			} else if(ratio <= TSL2561_K3T) {
+				b = TSL2561_B3T; m = TSL2561_M3T;
+			} else if(ratio <= TSL2561_K4T) {
+				b = TSL2561_B4T; m = TSL2561_M4T;
+			} else if (ratio <= TSL2561_K5T) {
+				b = TSL2561_B5T; m = TSL2561_M5T;
+			} else if(ratio <= TSL2561_K6T) {
+				b = TSL2561_B6T; m = TSL2561_M6T;
+			} else if(ratio <= TSL2561_K7T) {
+				b = TSL2561_B7T; m = TSL2561_M7T;
+			} else if(ratio > TSL2561_K8T) {
+				b = TSL2561_B8T; m = TSL2561_M8T;
+			}
+			break;
+	}
+
+	tmp = (channel0 * b) - (channel1 * m);
+
+	if(tmp < 0) 
+		tmp = 0;
+
+	tmp += (1 << (LUX_SCALE-1));
+	lux = (tmp >> LUX_SCALE);
+
+	return lux;
+}
+
 /*	
 *	Driver Lifecycle
 */
@@ -405,8 +577,12 @@ int __init tsl2561_init(void)
 
 	// set init sensor values
 	sensor_data->gain = TSL2561_GAIN_0X;
-	sensor_data->integration_time = TSL2561_INTEGRATION_TIME_402MS; 
+	//sensor_data->integration_time = TSL2561_INTEGRATION_TIME_402MS; 
+	sensor_data->integration_time = TSL2561_INTEGRATION_TIME_13MS; 
+	//sensor_data->autogain = true;
 	sensor_data->autogain = false;
+	sensor_data->type = 0;
+
 	tsl2561_enable();
 	tsl2561_set_timing((void*)sensor_data, sensor_data->integration_time, sensor_data->gain);
 finish:
