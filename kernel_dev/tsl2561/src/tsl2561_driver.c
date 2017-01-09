@@ -13,6 +13,8 @@
 #include <linux/input.h>		
 #include <linux/i2c.h>
 
+#include <linux/delay.h>		// allows for msleep
+
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Brian Vuong");
 MODULE_DESCRIPTION("Controls a TSL2561 Lux Sensor");
@@ -25,12 +27,31 @@ typedef struct sensor_data_t
 {
 	uint8_t gain;
 	uint8_t integration_time;
+	bool autogain;
 	struct input_dev *device;
 }sensor_data_t;
 
 sensor_data_t *sensor_data;
 
 #define TO_TSL(x)	(tsl2561_t*) x
+
+int tsl2561_enable(void);
+int tsl2561_disable(void *_tsl);
+
+//void* tsl2561_init(int address, const char *i2c_device_filepath);
+//void tsl2561_close(void *_tsl);
+
+void tsl2561_set_timing(void *_tsl, int integration_time, int gain);
+void tsl2561_set_gain(void *_tsl, int gain);
+void tsl2561_set_integration_time(void *_tsl, int ingeration_time);
+void tsl2561_set_type(void *_tsl, int type);
+
+void tsl2561_read(void *_tsl, int *visible, int *ir);
+long tsl2561_lux(void *_tsl);
+void tsl2561_luminosity(void *_tsl, int *visible, int *ir);
+	
+void tsl2561_enable_autogain(void *_tsl);
+void tsl2561_disable_autogain(void *_tsl);	
 
 /*
 *	I2C Setup
@@ -93,24 +114,23 @@ static void i2c_timer_callback(unsigned long data)
 #define TSL2561_CTRL_PWR_ON 0x03
 #define TSL2561_CTRL_PWR_OFF 0x00
 
+/* 
+ * Autogain thresholds
+ */
+#define TSL2561_AGC_THI_13MS 4850	// Max value at Ti 13ms = 5047
+#define TSL2561_AGC_TLO_13MS 100	
+#define TSL2561_AGC_THI_101MS 36000 // Max value at Ti 101ms = 37177
+#define TSL2561_AGC_TLO_101MS 200
+#define TSL2561_AGC_THI_402MS 63000	// Max value at Ti 402ms = 65535
+#define TSL2561_AGC_TLO_402MS 500	
 
-int tsl2561_enable(void);
-int tsl2561_disable(void *_tsl);
+/*
+ * Clipping thresholds
+ */
+#define TSL2561_CLIPPING_13MS 4900
+#define TSL2561_CLIPPING_101MS 37000
+#define TSL2561_CLIPPING_402MS 65000
 
-//void* tsl2561_init(int address, const char *i2c_device_filepath);
-//void tsl2561_close(void *_tsl);
-
-void tsl2561_set_timing(void *_tsl, int integration_time, int gain);
-void tsl2561_set_gain(void *_tsl, int gain);
-void tsl2561_set_integration_time(void *_tsl, int ingeration_time);
-void tsl2561_set_type(void *_tsl, int type);
-
-void tsl2561_read(void *_tsl, int *visible, int *ir);
-long tsl2561_lux(void *_tsl);
-void tsl2561_luminosity(void *_tsl, int *visible, int *ir);
-	
-void tsl2561_enable_autogain(void *_tsl);
-void tsl2561_disable_autogain(void *_tsl);	
 
 /*
 *	 Helper functions
@@ -228,6 +248,123 @@ static int setup_device(void)
 	return result;
 }
 
+// reads value from tsl2561 sensor
+void tsl2561_read(void *_tsl, int *broadband, int *ir)
+{
+	tsl2561_enable();
+	// tsl2561_t *tsl = TO_TSL(_tsl);
+
+	// wait until ADC is complete
+	switch(sensor_data->integration_time)
+	{
+		case TSL2561_INTEGRATION_TIME_402MS:
+			msleep(402);
+			break;
+		case TSL2561_INTEGRATION_TIME_101MS:
+			msleep(102);
+			break;
+		case TSL2561_INTEGRATION_TIME_13MS:
+			msleep(14);
+			break;
+		default:
+			msleep(402);
+			break;
+	}
+
+	*broadband = tsl2561_read_word_data(_tsl, TSL2561_CMD_BIT | TSL2561_WORD_BIT | TSL2561_REG_CH0_LOW);
+	*ir = tsl2561_read_word_data(_tsl, TSL2561_CMD_BIT | TSL2561_WORD_BIT | TSL2561_REG_CH1_LOW);
+	
+	if( *broadband < 0 || *ir < 0){
+		printk("error: i2c_smbus_read_word_data() failed\n");
+	} else {
+		printk("bb=%i, ir=%i\n", *broadband, *ir);
+	}
+	tsl2561_disable(_tsl);
+}
+
+// Computes a lux value for this sensor
+long tsl2561_lux(void *_tsl)
+{
+	// tsl2561_t *tsl = TO_TSL(_tsl);
+	int visible, channel1, threshold;
+	tsl2561_luminosity(i2c_client, &visible, &channel1);
+
+	switch(sensor_data->integration_time)
+	{
+		case TSL2561_INTEGRATION_TIME_13MS:
+			threshold = TSL2561_CLIPPING_13MS;
+			break;
+		case TSL2561_INTEGRATION_TIME_101MS:
+			threshold = TSL2561_CLIPPING_101MS;
+			break;
+		default:
+			threshold = TSL2561_CLIPPING_402MS;
+			break;
+	}
+
+	if((visible > threshold) || (channel1 > threshold))
+	{
+		return 0;
+	}
+
+	return tsl2561_compute_lux(sensor_data, visible, channel1);
+}
+
+void tsl2561_luminosity(void *_tsl, int *channel0, int *channel1)
+{
+	// tsl2561_t *tsl = TO_TSL(_tsl);
+	uint16_t hi, lo;
+	bool agc_check = false, valid = false;
+
+	if(!sensor_data->autogain)
+	{
+		tsl2561_read(_tsl, channel0, channel1);
+		return;
+	}
+
+	while(!valid)
+	{
+		switch(sensor_data->integration_time)
+		{
+			case TSL2561_INTEGRATION_TIME_13MS:
+				hi = TSL2561_AGC_THI_13MS;
+				lo = TSL2561_AGC_TLO_13MS;
+				break;
+
+			case TSL2561_INTEGRATION_TIME_101MS:
+				hi = TSL2561_AGC_THI_101MS;
+				lo = TSL2561_AGC_TLO_101MS;
+				break;
+
+			default:
+				hi = TSL2561_AGC_THI_402MS;
+				lo = TSL2561_AGC_TLO_402MS;
+				break;
+		}
+	}
+
+	tsl2561_read(_tsl, channel0, channel1);
+	if(!agc_check)
+	{
+		if((*channel0 < lo) && (sensor_data->gain == TSL2561_GAIN_0X)) {
+			tsl2561_set_gain(_tsl, TSL2561_GAIN_16X);
+			tsl2561_read(_tsl, channel0, channel1);
+			agc_check = true;
+
+		} else if((*channel0 > hi) && (sensor_data->gain == TSL2561_GAIN_16X)) {
+			tsl2561_set_gain(_tsl, TSL2561_GAIN_0X);
+			tsl2561_read(_tsl, channel0, channel1);
+			agc_check = true;
+		} else {
+			valid = true;
+		}
+	} 
+	else 
+	{
+		valid = true;
+	}
+	
+}
 /*	
 *	Driver Lifecycle
 */
@@ -265,6 +402,11 @@ int __init tsl2561_init(void)
 	// printk(KERN_INFO "Write Control, result: %d\n", value);
 	// value = i2c_smbus_read_byte(i2c_client)
 	// printk(KERN_INFO "Flush value: %d\n", value);
+
+	// set init sensor values
+	sensor_data->gain = TSL2561_GAIN_0X;
+	sensor_data->integration_time = TSL2561_INTEGRATION_TIME_402MS; 
+	sensor_data->autogain = false;
 	tsl2561_enable();
 	tsl2561_set_timing((void*)sensor_data, sensor_data->integration_time, sensor_data->gain);
 finish:
